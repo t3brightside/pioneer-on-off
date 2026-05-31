@@ -45,12 +45,48 @@ class AmpController:
             print(f"❌ Could not save state: {e}")
 
     def is_audio_playing(self):
-        """Checks ALSA hardware status for running streams."""
+        """
+        Smart audio detector: 
+        1. Checks Miliza's pre-fader volume flag in RAM.
+        2. Falls back to raw ALSA hardware states if Miliza is not running.
+        """
+        flag_file = "/dev/shm/amp_active"
+        
+        # --- STRATEGY 1: Miliza Volume Flag ---
+        if os.path.exists(flag_file):
+            try:
+                last_modified = os.path.getmtime(flag_file)
+                # If Miliza registered audio within the last 5 seconds, it's playing
+                if time.time() - last_modified < 5:
+                    return True
+                
+                # If the file exists but hasn't been touched, Miliza is running 
+                # but completely silent. We trust Miliza over ALSA here.
+                return False
+            except Exception:
+                pass # Fall through to ALSA if reading the file failed
+
+        # --- STRATEGY 2: Regular Linux ALSA Fallback ---
         try:
-            status = subprocess.check_output("grep -r 'RUNNING' /proc/asound/card*/pcm*/sub*/status || true", shell=True)
-            return b"RUNNING" in status
+            # Find all ALSA subdevice status files (e.g., /proc/asound/card*/pcm*/sub*/status)
+            status_files = glob.glob("/proc/asound/card*/pcm*/sub*/status")
+            
+            for status_file in status_files:
+                # Skip the Loopback device entirely so AirPlay monitoring doesn't trick the daemon
+                if "Loopback" in status_file:
+                    continue
+                    
+                try:
+                    with open(status_file, "r") as f:
+                        content = f.read()
+                        if "state: RUNNING" in content:
+                            return True
+                except (IOError, OSError):
+                    continue
         except Exception:
-            return False
+            pass
+
+        return False
 
     def toggle_amp(self, target_on, force=False):
         """Sends the serial command. Uses 'force' for manual CLI overrides."""
